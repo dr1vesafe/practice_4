@@ -1,5 +1,6 @@
 from config.database import Base, sync_engine
 from models.models import SpimexTradingResults
+from parser import sync_parser
 
 
 def create_tables():
@@ -13,6 +14,7 @@ def delete_tables():
 def main():
     delete_tables()
     create_tables()
+    sync_parser.db_load_data()
 
 
 main()
