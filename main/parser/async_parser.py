@@ -1,40 +1,52 @@
+import asyncio
 import datetime
 import pandas as pd
 from io import BytesIO
 from urllib.parse import urljoin
-from config.database import sync_session
+from config.database import async_session
 from models.models import SpimexTradingResults
-from .base_parser import sync_client, BASE_URL, LOAD_URL
+from .base_parser import async_client, BASE_URL, LOAD_URL
 
 
-def get_excel():
-    start_date = datetime.date(year=2025, month=1, day=1)
-    end_date = datetime.date.today()
-    delta = datetime.timedelta(days=1)
-    date = start_date
-
-    while date <= end_date:
-        date_str = date.strftime('%Y%m%d')
-        url = urljoin(BASE_URL, LOAD_URL.format(date_str))
-
+async def get_excel(date, semaphore):
+    date_str = date.strftime('%Y%m%d')
+    url = urljoin(BASE_URL, LOAD_URL.format(date_str))
+    async with semaphore:
         try:
-            response = sync_client.get(url)
-
+            response = await async_client.get(url)
             if response.status_code == 200:
                 print(f'{date}: {response.status_code}')
                 excel_content = response.content
                 df = pd.read_excel(BytesIO(excel_content))
-                yield (df, date)
+                return (df, date)
             else:
                 print(f'{date}: {response.status_code}')
-
         except Exception as e:
             print(f'Ошибка при загрузке: {e}')
+    return None
 
+
+async def get_all_excels():
+    semaphore = asyncio.Semaphore(25)
+    start_date = datetime.date(year=2025, month=1, day=1)
+    end_date = datetime.date.today()
+    delta = datetime.timedelta(days=1)
+    date = start_date
+    dates = []
+
+    while date <= end_date:
+        dates.append(date)
         date += delta
 
+    tasks = [asyncio.create_task(get_excel(task_date, semaphore)) for task_date in dates]
+    results = await asyncio.gather(*tasks)
 
-def parse_excel():
+    for result in results:
+        if result:
+            yield result
+
+
+async def parse_excel():
     columns = {
         'Код Инструмента': 'exchange_product_id',
         'Наименование Инструмента': 'exchange_product_name',
@@ -44,7 +56,7 @@ def parse_excel():
         'Количество Договоров, шт.': 'count',
     }
 
-    for df, date in get_excel():
+    async for df, date in get_all_excels():
         df_slice = df.iloc[5:, 1:].dropna(how='all')
         df_slice.columns = (
             df_slice.iloc[0]
@@ -82,9 +94,9 @@ def parse_excel():
         yield (df_slice, date)
 
 
-def db_load_data():
-    with sync_session() as session:
-        for df, date in parse_excel():
+async def db_load_data():
+    async with async_session() as session:
+        async for df, date in parse_excel():
             try:
                 for _, row in df.iterrows():
                     session.add(
@@ -111,7 +123,7 @@ def db_load_data():
                             date=date
                         )
                     )
-                session.commit()
+                await session.commit()
             except Exception as e:
                 print(f'Ошибка при загрузке данных: {e}')
-                session.rollback()
+                await session.rollback()
